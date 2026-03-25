@@ -10,8 +10,8 @@
 }
 
 :root {
-  -morange: #FF6803;
-  -black: #000000;
+  --orange: #FF6803;
+  --black: #000000;
   --dark: #0A0A0A;
   --dark-100: #111111;
   --dark-200: #1A1A1A;
