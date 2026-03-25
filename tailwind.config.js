@@ -27,7 +27,7 @@ export default {
           300: '#222222',
           400: '#2A2A2A',
           500: '#333333',
-        }
+        },
       },
       fontFamily: {
         poppins: ['Poppins', 'sans-serif'],
@@ -37,9 +37,21 @@ export default {
         'slide-up': 'slideUp 0.5s ease-out',
         'pulse-orange': 'pulseOrange 2s infinite',
       },
-                                  {
-	 keyframes: {
+      keyframes: {
         fadeIn: {
           '0%': { opacity: '0' },
           '100%': { opacity: '1' },
         },
+        slideUp: {
+          '0%': { transform: 'translateY(20px)', opacity: '0' },
+          '100%': { transform: 'translateY(0)', opacity: '1' },
+        },
+        pulseOrange: {
+          '0%, 100%': { boxShadow: '0 0 0 0 rgba(255, 104, 3, 0.4)' },
+          '50%': { boxShadow: '0 0 0 10px rgba(255, 104, 3, 0)' },
+        },
+      },
+    },
+  },
+  plugins: [],
+}
