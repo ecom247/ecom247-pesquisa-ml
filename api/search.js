@@ -1,138 +1,150 @@
-import { createClient } from '@supabase/supabase-js'
+export const config = { runtime: 'edge', regions: ['gru1'] }
 
-const SUPABASE_URL = process.env.SUPABASE_URL
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
-const ML_APP_ID = process.env.ML_APP_ID
-const ML_SECRET_KEY = process.env.ML_SECRET_KEY
 const ML_BASE = 'https://api.mercadolibre.com'
-const UA = 'Mozilla/5.0 (compatible; NodeFetch/1.0)'
 
-const adminSupabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
-async function getValidToken() {
-  const { data: row, error } = await adminSupabase.from('ml_tokens').select('*').eq('id', 1).single()
-  if (error || !row) throw new Error('Tokens ML nao encontrados.')
-  const expiresAt = new Date(row.expires_at).getTime()
-  if (Date.now() > expiresAt - 10 * 60 * 1000) return refreshMLToken(row.refresh_token)
-  return row.access_token
-}
-
-async function refreshMLToken(refreshTk) {
-  const res = await fetch(ML_BASE + '/oauth/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': UA },
-    body: new URLSearchParams({ grant_type: 'refresh_token', client_id: ML_APP_ID, client_secret: ML_SECRET_KEY, refresh_token: refreshTk }),
+async function supaFetch(supaUrl, serviceKey, method, path, body) {
+  const res = await fetch(supaUrl + '/rest/v1' + path, {
+    method: method || 'GET',
+    headers: {
+      'apikey': serviceKey,
+      'Authorization': 'Bearer ' + serviceKey,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=representation'
+    },
+    ...(body ? { body: JSON.stringify(body) } : {})
   })
-  if (!res.ok) { const t = await res.text(); throw new Error('Refresh token falhou: ' + res.status + ' ' + t) }
-  const tokens = await res.json()
-  const newExp = new Date(Date.now() + tokens.expires_in * 1000).toISOString()
-  await adminSupabase.from('ml_tokens').update({ access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires_at: newExp, updated_at: new Date().toISOString() }).eq('id', 1)
-  return tokens.access_token
-}
-
-async function mlGet(path, token) {
-  const headers = { 'User-Agent': UA, 'Accept': 'application/json' }
-  if (token) headers['Authorization'] = 'Bearer ' + token
-  const res = await fetch(ML_BASE + path, { headers })
-  if (!res.ok) throw new Error('ML API ' + path.slice(0,60) + ' retornou ' + res.status)
+  if (!res.ok) {
+    const t = await res.text()
+    throw new Error('Supa ' + method + ' ' + path + ' -> ' + res.status + ': ' + t.slice(0,120))
+  }
   return res.json()
 }
 
-function calcScore(totalSales, numComp, avgPrice, fullCount) {
-  const d = Math.min(40, Math.round((totalSales / 300) * 40))
-  const c = Math.max(0, Math.round(30 - (numComp > 0 ? fullCount / numComp : 0) * 20 - (numComp > 8 ? 10 : 0)))
-  const p = Math.min(30, Math.round((avgPrice / 500) * 30))
-  return { demand: d, competition: c, price: p, total: d + c + p }
+async function getValidToken(supaUrl, serviceKey, appId, appSecret) {
+  const rows = await supaFetch(supaUrl, serviceKey, 'GET', '/ml_tokens?id=eq.1&select=*')
+  if (!rows?.length) throw new Error('No token row')
+  const row = rows[0]
+  if (new Date(row.expires_at).getTime() - Date.now() > 5 * 60 * 1000) return row.access_token
+  const refreshRes = await fetch(ML_BASE + '/oauth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+    body: 'grant_type=refresh_token&client_id=' + appId + '&client_secret=' + appSecret + '&refresh_token=' + encodeURIComponent(row.refresh_token)
+  })
+  if (!refreshRes.ok) { console.warn('[ml] refresh failed:', refreshRes.status); return row.access_token }
+  const d = await refreshRes.json()
+  const newExpiry = new Date(Date.now() + (d.expires_in - 300) * 1000).toISOString()
+  await supaFetch(supaUrl, serviceKey, 'PATCH', '/ml_tokens?id=eq.1', {
+    access_token: d.access_token,
+    refresh_token: d.refresh_token || row.refresh_token,
+    expires_at: newExpiry,
+    updated_at: new Date().toISOString()
+  })
+  return d.access_token
 }
 
-export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-  if (req.method === 'OPTIONS') return res.status(200).end()
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+export default async function handler(request) {
+  const cors = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Content-Type': 'application/json'
+  }
+  if (request.method === 'OPTIONS') return new Response(null, { headers: cors })
+  if (request.method !== 'POST') return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers: cors })
 
-  const authHeader = req.headers.authorization || ''
-  if (!authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Token necessario.' })
-  const jwt = authHeader.slice(7)
-  const { data: { user }, error: authErr } = await adminSupabase.auth.getUser(jwt)
-  if (authErr || !user) return res.status(401).json({ error: 'Token invalido.' })
+  const SUPA_URL = process.env.SUPABASE_URL
+  const SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
+  const APP_ID = process.env.ML_APP_ID
+  const APP_SECRET = process.env.ML_APP_SECRET
 
-  const { query } = req.body || {}
-  if (!query || !query.trim()) return res.status(400).json({ error: 'Informe o produto.' })
+  let userId
+  try {
+    const auth = request.headers.get('authorization')
+    if (!auth?.startsWith('Bearer ')) throw new Error('No auth header')
+    const userRes = await fetch(SUPA_URL + '/auth/v1/user', {
+      headers: { 'apikey': SUPA_KEY, 'Authorization': auth }
+    })
+    if (!userRes.ok) throw new Error('Token invalid: ' + userRes.status)
+    const u = await userRes.json()
+    userId = u.id
+    if (!userId) throw new Error('No user ID')
+  } catch(e) {
+    return new Response(JSON.stringify({ error: 'Unauthorized: ' + e.message }), { status: 401, headers: cors })
+  }
+
+  let body
+  try { body = await request.json() } catch(e) {
+    return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers: cors })
+  }
+  const { query } = body
+  if (!query?.trim()) return new Response(JSON.stringify({ error: 'Query required' }), { status: 400, headers: cors })
+
+  const q = encodeURIComponent(query.trim())
+  let mlToken = null
+  try { mlToken = await getValidToken(SUPA_URL, SUPA_KEY, APP_ID, APP_SECRET) } catch(e) { console.warn('[ml] token err:', e.message) }
+
+  let searchData
+  try {
+    const hdrs = { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 (compatible; ECOM247/1.0)' }
+    if (mlToken) hdrs['Authorization'] = 'Bearer ' + mlToken
+    let res = await fetch(ML_BASE + '/sites/MLB/search?q=' + q + '&limit=20&sort=sold_quantity_desc', { headers: hdrs })
+    if (!res.ok) {
+      console.warn('[ml] with token failed', res.status, ', trying without...')
+      res = await fetch(ML_BASE + '/sites/MLB/search?q=' + q + '&limit=20', { headers: { 'Accept': 'application/json' } })
+    }
+    if (!res.ok) throw new Error('ML API /sites/MLB/search retornou ' + res.status)
+    searchData = await res.json()
+  } catch(e) {
+    console.error('[ml-search] Error:', e.message)
+    return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: cors })
+  }
+
+  const items = searchData.results || []
+  const competitors = items.slice(0, 10).map(item => ({
+    id: item.id, title: item.title, price: item.price,
+    sold: item.sold_quantity || 0, seller: item.seller?.nickname || 'N/A',
+    rating: item.reviews?.rating_average || 0, url: item.permalink,
+    thumbnail: item.thumbnail, condition: item.condition,
+    shipping_free: item.shipping?.free_shipping || false
+  }))
+  const prices = items.map(i => i.price).filter(p => p > 0)
+  const avgPrice = prices.length ? Math.round(prices.reduce((a,b) => a+b, 0) / prices.length) : 0
+  const totalSales = items.reduce((sum, i) => sum + (i.sold_quantity || 0), 0)
+  const topItem = items.reduce((top, item) => (!top || (item.sold_quantity||0) > (top.sold_quantity||0)) ? item : top, null)
+
+  const hasHighDemand = totalSales > 500
+  const hasCompetition = items.length >= 10
+  const hasGoodMargin = avgPrice > 50
+  const freePct = items.filter(i => i.shipping?.free_shipping).length / Math.max(items.length, 1)
+  let score = 45
+  if (hasHighDemand) score += 20
+  if (hasGoodMargin) score += 15
+  if (!hasCompetition) score += 10
+  if (freePct > 0.5) score += 10
+  score = Math.min(100, Math.max(0, score))
+
+  const months = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez']
+  const base = totalSales / 12
+  const demandData = months.map(month => ({ month, sales: Math.round(base * (0.7 + Math.random() * 0.6)) }))
+
+  const scoreDetails = {
+    demand: hasHighDemand ? 'Alta demanda' : 'Demanda moderada',
+    competition: hasCompetition ? 'Alta concorrência' : 'Baixa concorrência',
+    margin: hasGoodMargin ? 'Margem boa' : 'Margem baixa',
+    shipping: freePct > 0.5 ? 'Frete grátis dominante' : 'Frete pago comum'
+  }
 
   try {
-    let mlToken = null
-    try { mlToken = await getValidToken() } catch(e) { console.warn('[ml] Token indisponivel:', e.message) }
-
-    // Search using token if available (higher rate limits), else public
-    let searchData
-    try {
-      searchData = await mlGet('/sites/MLB/search?q=' + encodeURIComponent(query.trim()) + '&limit=20&sort=sold_quantity_desc', mlToken)
-    } catch(e) {
-      // Try without sort if first attempt fails
-      searchData = await mlGet('/sites/MLB/search?q=' + encodeURIComponent(query.trim()) + '&limit=20', null)
-    }
-    const items = searchData.results || []
-
-    if (items.length === 0) {
-      return res.status(200).json({ query, score: 0, scoreDetails: { demand: 0, competition: 0, price: 0, total: 0 }, competitors: [], demandData: [], totalSales: 0, avgPrice: 0, category: '' })
-    }
-
-    const topItems = items.slice(0, 10)
-    const itemResults = await Promise.allSettled(topItems.map(item => mlGet('/items/' + item.id, mlToken)))
-    const sellerIds = [...new Set(topItems.map(i => i.seller && i.seller.id).filter(Boolean))].slice(0, 6)
-    const sellerResults = await Promise.allSettled(sellerIds.map(id => mlGet('/users/' + id, mlToken)))
-    const sellers = {}
-    sellerResults.forEach(r => { if (r.status === 'fulfilled' && r.value && r.value.id) sellers[r.value.id] = r.value })
-
-    const REP = { green_aa: 'Excelente', green: 'Muito Bom', yellow: 'Bom', orange: 'Regular', red: 'Pessimo' }
-    const competitors = topItems.map((item, i) => {
-      const detail = (itemResults[i] && itemResults[i].status === 'fulfilled') ? itemResults[i].value : {}
-      const seller = (item.seller && sellers[item.seller.id]) ? sellers[item.seller.id] : {}
-      const rep = seller.seller_reputation || {}
-      const txn = rep.transactions || {}
-      const pos = txn.ratings ? txn.ratings.positive || 0 : 0
-      return {
-        id: item.id,
-        name: seller.nickname || (item.seller && item.seller.nickname) || ('Vendedor ' + (i + 1)),
-        price: item.price || 0,
-        sales: detail.sold_quantity || item.sold_quantity || 0,
-        rating: parseFloat(Math.max(3.5, pos * 5).toFixed(1)),
-        reputation: REP[rep.power_seller_status] || REP[rep.level_id] || 'Bom',
-        shipping: (detail.shipping && detail.shipping.logistic_type === 'fulfillment') ? 'Full' : 'Normal',
-        visits: detail.health || 0,
-        link: item.permalink || '',
-        thumbnail: item.thumbnail || '',
-        title: item.title || '',
-      }
+    await supaFetch(SUPA_URL, SUPA_KEY, 'POST', '/search_history', {
+      user_id: userId, query: query.trim(), score,
+      results: { competitors: competitors.length, avgPrice, totalSales },
+      category: searchData.filters?.find(f => f.id === 'category')?.values?.[0]?.name || null
     })
+  } catch(e) { console.warn('[ml] history save err:', e.message) }
 
-    const totalSales = competitors.reduce((s, c) => s + c.sales, 0)
-    const avgPrice = competitors.length > 0 ? competitors.reduce((s, c) => s + c.price, 0) / competitors.length : 0
-    const scoreDetails = calcScore(totalSales, competitors.length, avgPrice, competitors.filter(c => c.shipping === 'Full').length)
-    const score = scoreDetails.total
-    const SEASON = [{ month: 'Out', f: 0.80 }, { month: 'Nov', f: 1.20 }, { month: 'Dez', f: 1.80 }, { month: 'Jan', f: 0.70 }, { month: 'Fev', f: 0.80 }, { month: 'Mar', f: 0.90 }]
-    const base = Math.max(totalSales, 100)
-    let label = 'Oportunidade Moderada', labelColor = 'orange'
-    if (score >= 75) { label = 'Alta Oportunidade'; labelColor = 'green' }
-    else if (score >= 55) { label = 'Boa Oportunidade'; labelColor = 'yellow' }
-
-    const result = {
-      query, score,
-      scoreDetails: Object.assign({}, scoreDetails, { label, labelColor }),
-      competitors,
-      demandData: SEASON.map(s => ({ month: s.month, searches: Math.round(base * s.f * 4.2), sales: Math.round(base * s.f) })),
-      totalSales, avgPrice: parseFloat(avgPrice.toFixed(2)),
-      category: items[0] ? items[0].category_id : '',
-      topItem: items[0] ? { id: items[0].id, title: items[0].title, thumbnail: items[0].thumbnail, permalink: items[0].permalink } : null,
-    }
-
-    await adminSupabase.from('search_history').insert({ user_id: user.id, query: query.trim(), results: result, score, category: result.category })
-    return res.status(200).json(result)
-
-  } catch (err) {
-    console.error('[ml-search] Error:', err.message)
-    return res.status(500).json({ error: err.message || 'Erro interno.' })
-  }
+  return new Response(JSON.stringify({
+    competitors, demandData, score, scoreDetails, avgPrice, totalSales,
+    topItem: topItem ? { title: topItem.title, price: topItem.price, sold: topItem.sold_quantity, url: topItem.permalink } : null,
+    query: query.trim(), total: searchData.paging?.total || 0
+  }), { headers: cors })
 }
