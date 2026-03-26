@@ -89,10 +89,17 @@ export default async function handler(request) {
     if (mlToken) hdrs['Authorization'] = 'Bearer ' + mlToken
     let res = await fetch(ML_BASE + '/sites/MLB/search?q=' + q + '&limit=20&sort=sold_quantity_desc', { headers: hdrs })
     if (!res.ok) {
-      console.warn('[ml] with token failed', res.status, ', trying without...')
-      res = await fetch(ML_BASE + '/sites/MLB/search?q=' + q + '&limit=20', { headers: { 'Accept': 'application/json' } })
+      const errBody = await res.text()
+      console.warn('[ml] with token failed', res.status, errBody.slice(0,200))
+      // Try with access_token as query param
+      const paramUrl = ML_BASE + '/sites/MLB/search?q=' + q + '&limit=20' + (mlToken ? '&access_token=' + mlToken : '')
+      res = await fetch(paramUrl, { headers: { 'Accept': 'application/json' } })
     }
-    if (!res.ok) throw new Error('ML API /sites/MLB/search retornou ' + res.status)
+    if (!res.ok) {
+      const errBody2 = await res.text()
+      console.warn('[ml] fallback failed', res.status, errBody2.slice(0,200))
+      throw new Error('ML API retornou ' + res.status + ': ' + errBody2.slice(0,100))
+    }
     searchData = await res.json()
   } catch(e) {
     console.error('[ml-search] Error:', e.message)
@@ -129,9 +136,9 @@ export default async function handler(request) {
 
   const scoreDetails = {
     demand: hasHighDemand ? 'Alta demanda' : 'Demanda moderada',
-    competition: hasCompetition ? 'Alta concorrÃªncia' : 'Baixa concorrÃªncia',
+    competition: hasCompetition ? 'Alta concorrÃÂªncia' : 'Baixa concorrÃÂªncia',
     margin: hasGoodMargin ? 'Margem boa' : 'Margem baixa',
-    shipping: freePct > 0.5 ? 'Frete grÃ¡tis dominante' : 'Frete pago comum'
+    shipping: freePct > 0.5 ? 'Frete grÃÂ¡tis dominante' : 'Frete pago comum'
   }
 
   try {
