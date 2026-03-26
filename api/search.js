@@ -55,7 +55,7 @@ export default async function handler(request) {
   const SUPA_URL = process.env.SUPABASE_URL
   const SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
   const APP_ID = process.env.ML_APP_ID
-  const APP_SECRET = process.env.ML_APP_SECRET
+  const APP_SECRET = process.env.ML_APP_SECRET || process.env.ML_SECRET_KEY
 
   let userId
   try {
@@ -129,9 +129,9 @@ export default async function handler(request) {
 
   const scoreDetails = {
     demand: hasHighDemand ? 'Alta demanda' : 'Demanda moderada',
-    competition: hasCompetition ? 'Alta concorrência' : 'Baixa concorrência',
+    competition: hasCompetition ? 'Alta concorrÃªncia' : 'Baixa concorrÃªncia',
     margin: hasGoodMargin ? 'Margem boa' : 'Margem baixa',
-    shipping: freePct > 0.5 ? 'Frete grátis dominante' : 'Frete pago comum'
+    shipping: freePct > 0.5 ? 'Frete grÃ¡tis dominante' : 'Frete pago comum'
   }
 
   try {
