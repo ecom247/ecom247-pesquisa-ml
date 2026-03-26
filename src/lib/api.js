@@ -1,10 +1,10 @@
 import { supabase } from './supabase'
 
-const SEARCH_URL = 'https://hcnvrvjjokbouwmwcbvy.supabase.co/functions/v1/ml-search'
+const SEARCH_URL = '/api/search'
 
 export async function searchML(query) {
   const { data: { session } } = await supabase.auth.getSession()
-  if (!session) throw new Error('Não autenticado')
+  if (!session) throw new Error('NÃ£o autenticado')
 
   const res = await fetch(SEARCH_URL, {
     method: 'POST',
