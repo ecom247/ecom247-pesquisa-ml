@@ -5,8 +5,9 @@ const ML_APP_SECRET = process.env.ML_APP_SECRET || ''
 const REDIRECT_URI = 'https://ecom247-pesquisa-ml.vercel.app/api/ml-oauth-callback'
 const DASHBOARD_URL = 'https://ecom247-pesquisa-ml.vercel.app/dashboard'
 
-module.exports = async function handler(req, res) {
-  const { code: authCode, error } = req.query || {}
+export default async function handler(req, res) {
+  const authCode = req.query?.code
+  const error = req.query?.error
 
   if (error) {
     return res.redirect(302, DASHBOARD_URL + '?ml_error=' + encodeURIComponent(String(error)))
@@ -22,7 +23,6 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    // Exchange code for tokens
     const params = new URLSearchParams()
     params.set('grant_type', 'authorization_code')
     params.set('client_id', ML_APP_ID)
@@ -42,7 +42,6 @@ module.exports = async function handler(req, res) {
       return res.redirect(302, DASHBOARD_URL + '?ml_error=token_exchange_failed&detail=' + encodeURIComponent(tokens.message || tokens.error || ''))
     }
 
-    // Save to Supabase via REST API (no SDK needed)
     const expiresAt = new Date(Date.now() + (tokens.expires_in || 21600) * 1000).toISOString()
     const dbRes = await fetch(SUPABASE_URL + '/rest/v1/ml_tokens', {
       method: 'POST',
@@ -70,7 +69,7 @@ module.exports = async function handler(req, res) {
 
     return res.redirect(302, DASHBOARD_URL + '?ml_auth=success')
   } catch (err) {
-    console.error('Unexpected error:', err)
+    console.error('Unexpected error:', String(err))
     return res.redirect(302, DASHBOARD_URL + '?ml_error=unexpected&detail=' + encodeURIComponent(String(err.message || err)))
   }
 }
