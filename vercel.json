@@ -1,11 +1,20 @@
 {
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/$1" },
-    { "source": "/(.*)", "destination": "/index.html" }
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/$1"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
   ],
   "functions": {
     "api/search.js": {
       "maxDuration": 30
+    },
+    "api/ml-oauth-callback.js": {
+      "maxDuration": 15
     }
   }
 }
