@@ -21,6 +21,7 @@ import ActionPlan from '../components/ActionPlan'
 import ComparisonPage from './ComparisonPage'
 import AlertsPage from './AlertsPage'
 import { searchML, getHistory } from '../lib/api'
+import { supabase } from '../lib/supabase'
 import {
   mockSeasonality,
   mockMarketShare,
@@ -82,9 +83,17 @@ export default function DashboardPage() {
   const [topItem, setTopItem] = useState(null)
 
   const [history, setHistory] = useState([])
+  const [mlConnected, setMlConnected] = useState(null)
+  const [mlNotif, setMlNotif] = useState('')
 
   useEffect(() => {
     loadHistory()
+    checkMlConnection()
+    const params = new URLSearchParams(window.location.search)
+    const mlAuth = params.get('ml_auth')
+    const mlError = params.get('ml_error')
+    if (mlAuth === 'success') { setMlNotif('success'); setMlConnected(true); window.history.replaceState({}, '', '/dashboard') }
+    else if (mlError) { setMlNotif('error:' + mlError); window.history.replaceState({}, '', '/dashboard') }
   }, [])
 
   const loadHistory = async () => {
@@ -94,6 +103,17 @@ export default function DashboardPage() {
     } catch (e) {
       console.warn('Erro ao carregar historico:', e)
     }
+  }
+
+  const checkMlConnection = async () => {
+    try {
+      const { data } = await supabase.from('ml_tokens').select('id').eq('id', 1).single()
+      setMlConnected(!!(data && data.id))
+    } catch { setMlConnected(false) }
+  }
+  const handleConnectML = () => {
+    const cb = encodeURIComponent('https://ecom247-pesquisa-ml.vercel.app/api/ml-oauth-callback')
+    window.location.href = `https://auth.mercadolivre.com.br/authorization?response_type=code&client_id=2014098063924509&redirect_uri=${cb}&state=ecom247reauth`
   }
 
   const handleSearch = async (query) => {
@@ -263,6 +283,15 @@ export default function DashboardPage() {
             <p className="text-gray-500 text-xs truncate">{user?.email}</p>
           </div>
         </div>
+      </div>
+      <div className="px-4 py-2 border-b border-dark-300">
+        {mlNotif === 'success' && <div className="mb-2 text-xs text-green-400 bg-green-900/30 border border-green-800 rounded-lg px-3 py-1.5">✓ ML conectado!</div>}
+        {mlNotif && mlNotif.startsWith('error:') && <div className="mb-2 text-xs text-red-400 bg-red-900/30 border border-red-800 rounded-lg px-3 py-1.5">Erro: {mlNotif.replace('error:','')}</div>}
+        <button onClick={handleConnectML} disabled={mlConnected === true}
+          className={`w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-xs font-medium transition ${mlConnected ? 'bg-green-900/30 border border-green-800 text-green-400 cursor-default' : 'bg-yellow-500/10 border border-yellow-600/40 text-yellow-400 hover:bg-yellow-500/20'}`}>
+          <span>{mlConnected ? '✓' : '🔗'}</span>
+          {mlConnected ? 'ML Conectado' : mlConnected === null ? 'Verificando...' : 'Conectar ML'}
+        </button>
       </div>
       <nav className="flex-1 overflow-y-auto py-3 space-y-4">
         {groups.map(group => (
