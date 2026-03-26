@@ -1,9 +1,9 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Search, BarChart2, TrendingUp, Users, DollarSign, Calendar,
-  GitCompare, Bell, History, LogOut, ChevronRight, Menu, X,
-  Sparkles, AlertCircle, FileText, Target, Zap
+  GitCompare, Bell, History, LogOut, Menu, X,
+  Sparkles, FileText, Target, Zap, AlertCircle
 } from 'lucide-react'
 import { useAuth } from '../App'
 import { LogoOnDark } from '../components/Logo'
@@ -20,30 +20,35 @@ import ComplaintsAnalysis from '../components/ComplaintsAnalysis'
 import ActionPlan from '../components/ActionPlan'
 import ComparisonPage from './ComparisonPage'
 import AlertsPage from './AlertsPage'
+import { searchML, getHistory } from '../lib/api'
 import {
-  mockCompetitors, mockDemandData, mockPriceDistribution,
-  mockCategoryMetrics, mockScoreData, mockSearchHistory,
-  mockSeasonalityData, mockMarketShareData, mockComplaints,
-  mockActionPlan, mockAlerts
+  mockSeasonality,
+  mockMarketShare,
+  mockComplaints,
+  mockActionPlan,
+  mockAlerts,
 } from '../data/mockData'
 
-const navSections = [
-  { id: 'search', label: 'Nova Pesquisa', icon: Search, group: 'main' },
-  { id: 'score', label: 'Score', icon: Target, group: 'results', requiresSearch: true },
-  { id: 'competitors', label: 'Concorrentes', icon: Users, group: 'results', requiresSearch: true },
-  { id: 'demand', label: 'Demanda', icon: TrendingUp, group: 'results', requiresSearch: true },
-  { id: 'seasonality', label: 'Sazonalidade', icon: Calendar, group: 'results', requiresSearch: true },
-  { id: 'pricing', label: 'Calculadora', icon: DollarSign, group: 'results', requiresSearch: true },
-  { id: 'actionplan', label: 'Plano de Acao IA', icon: Zap, group: 'results', requiresSearch: true },
-  { id: 'comparison', label: 'Comparacao', icon: GitCompare, group: 'tools' },
-  { id: 'alerts', label: 'Alertas', icon: Bell, group: 'tools', badge: 1 },
-  { id: 'history', label: 'Historico', icon: History, group: 'tools' },
+const navItems = [
+  { id: 'search',      label: 'Pesquisa',    icon: Search,     group: 'main' },
+  { id: 'score',       label: 'Score',       icon: Target,     group: 'main' },
+  { id: 'competitors', label: 'Concorrentes', icon: Users,     group: 'main' },
+  { id: 'demand',      label: 'Demanda',     icon: TrendingUp, group: 'main' },
+  { id: 'pricing',     label: 'Precificacao', icon: DollarSign, group: 'main' },
+  { id: 'seasonality', label: 'Sazonalidade', icon: Calendar,  group: 'insights' },
+  { id: 'marketshare', label: 'Market Share', icon: BarChart2, group: 'insights' },
+  { id: 'complaints',  label: 'Reclamacoes', icon: AlertCircle, group: 'insights' },
+  { id: 'plan',        label: 'Plano IA',    icon: Sparkles,   group: 'insights' },
+  { id: 'export',      label: 'Exportar PDF', icon: FileText,  group: 'tools' },
+  { id: 'comparison',  label: 'Comparacao',  icon: GitCompare, group: 'tools' },
+  { id: 'alerts',      label: 'Alertas',     icon: Bell,       group: 'tools', badge: 3 },
+  { id: 'history',     label: 'Historico',   icon: History,    group: 'tools' },
 ]
 
 function LoadingState() {
   return (
     <div className="space-y-6 animate-pulse p-6">
-      {[1, 2, 3].map((i) => (
+      {[1, 2, 3].map(i => (
         <div key={i} className="bg-dark-200 border border-dark-300 rounded-2xl p-6">
           <div className="h-4 bg-dark-400 rounded w-1/3 mb-4" />
           <div className="space-y-3">
@@ -58,209 +63,288 @@ function LoadingState() {
 }
 
 export default function DashboardPage() {
-  const { logout } = useAuth()
+  const { logout, user } = useAuth()
   const navigate = useNavigate()
   const [activeSection, setActiveSection] = useState('search')
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [searchDone, setSearchDone] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [searchQuery, setSearchQuery] = useState('')
 
-  const handleLogout = () => {
-    logout()
+  const [isLoading, setIsLoading] = useState(false)
+  const [hasResults, setHasResults] = useState(false)
+  const [searchError, setSearchError] = useState('')
+
+  const [currentQuery, setCurrentQuery] = useState('')
+  const [competitors, setCompetitors] = useState([])
+  const [demandData, setDemandData] = useState([])
+  const [score, setScore] = useState(0)
+  const [scoreDetails, setScoreDetails] = useState({})
+  const [avgPrice, setAvgPrice] = useState(0)
+  const [totalSales, setTotalSales] = useState(0)
+  const [topItem, setTopItem] = useState(null)
+
+  const [history, setHistory] = useState([])
+
+  useEffect(() => {
+    loadHistory()
+  }, [])
+
+  const loadHistory = async () => {
+    try {
+      const data = await getHistory()
+      setHistory(data)
+    } catch (e) {
+      console.warn('Erro ao carregar historico:', e)
+    }
+  }
+
+  const handleSearch = async (query) => {
+    if (!query.trim()) return
+    setIsLoading(true)
+    setSearchError('')
+    setHasResults(false)
+    setCurrentQuery(query)
+
+    try {
+      const data = await searchML(query)
+      setCompetitors(data.competitors || [])
+      setDemandData(data.demandData || [])
+      setScore(data.score || 0)
+      setScoreDetails(data.scoreDetails || {})
+      setAvgPrice(data.avgPrice || 0)
+      setTotalSales(data.totalSales || 0)
+      setTopItem(data.topItem || null)
+      setHasResults(true)
+      setActiveSection('score')
+      await loadHistory()
+    } catch (err) {
+      setSearchError(err.message || 'Erro ao buscar dados. Tente novamente.')
+      setIsLoading(false)
+      return
+    }
+
+    setIsLoading(false)
+  }
+
+  const handleLogout = async () => {
+    await logout()
     navigate('/login')
   }
 
-  const handleSearch = (query) => {
-    setSearchQuery(query)
-    setLoading(true)
-    setTimeout(() => {
-      setLoading(false)
-      setSearchDone(true)
-      setActiveSection('score')
-    }, 1500)
-  }
+  const userName = user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'Aluno'
 
-  const renderContent = () => {
-    if (loading) return <LoadingState />
+  const renderSection = () => {
+    if (isLoading) return <LoadingState />
+
+    if (searchError) {
+      return (
+        <div className="p-6">
+          <div className="bg-red-900/30 border border-red-800 text-red-400 rounded-2xl p-6 text-center">
+            <AlertCircle size={32} className="mx-auto mb-3 opacity-70" />
+            <p className="font-medium">{searchError}</p>
+            <button
+              onClick={() => { setSearchError(''); setActiveSection('search') }}
+              className="mt-4 text-sm text-orange-400 hover:text-orange-300 transition"
+            >
+              Tentar novamente
+            </button>
+          </div>
+        </div>
+      )
+    }
+
     switch (activeSection) {
       case 'search':
         return (
-          <div className="p-6">
-            <h2 className="text-2xl font-bold mb-2">Nova Pesquisa</h2>
-            <p className="text-gray-400 mb-6">Pesquise um produto para analisar o mercado no Mercado Livre</p>
+          <div className="p-6 space-y-6">
+            <div>
+              <h2 className="text-xl font-bold text-white mb-1">Nova Pesquisa</h2>
+              <p className="text-gray-400 text-sm">
+                Digite um produto para analisar o mercado no Mercado Livre
+              </p>
+            </div>
             <SearchBar onSearch={handleSearch} />
+            {!hasResults && (
+              <div className="bg-dark-200 border border-dark-300 rounded-2xl p-8 text-center">
+                <div className="w-16 h-16 bg-orange-900/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <Search size={28} className="text-orange-400" />
+                </div>
+                <h3 className="text-white font-semibold mb-2">Pronto para pesquisar</h3>
+                <p className="text-gray-400 text-sm max-w-sm mx-auto">
+                  Use dados reais do Mercado Livre para encontrar as melhores oportunidades de produto.
+                </p>
+              </div>
+            )}
           </div>
         )
+
       case 'score':
-        return <ScoreCard data={mockScoreData} product={searchQuery} />
+        return hasResults ? (
+          <ScoreCard score={score} details={scoreDetails} query={currentQuery} topItem={topItem} avgPrice={avgPrice} totalSales={totalSales} />
+        ) : (
+          <EmptyState onSearch={() => setActiveSection('search')} />
+        )
+
       case 'competitors':
-        return <CompetitorTable data={mockCompetitors} />
+        return hasResults ? (
+          <CompetitorTable data={competitors} />
+        ) : (
+          <EmptyState onSearch={() => setActiveSection('search')} />
+        )
+
       case 'demand':
-        return <DemandChart data={mockDemandData} />
-      case 'seasonality':
-        return <SeasonalityChart data={mockSeasonalityData} />
+        return hasResults ? (
+          <DemandChart data={demandData} />
+        ) : (
+          <EmptyState onSearch={() => setActiveSection('search')} />
+        )
+
       case 'pricing':
-        return <PricingCalculator data={mockPriceDistribution} categoryMetrics={mockCategoryMetrics} />
-      case 'actionplan':
-        return <ActionPlan data={mockActionPlan} />
+        return hasResults ? (
+          <PricingCalculator avgPrice={avgPrice} />
+        ) : (
+          <EmptyState onSearch={() => setActiveSection('search')} />
+        )
+
+      case 'seasonality':
+        return <SeasonalityChart data={mockSeasonality} />
+
+      case 'marketshare':
+        return <MarketShareChart data={mockMarketShare} />
+
+      case 'complaints':
+        return <ComplaintsAnalysis data={mockComplaints} />
+
+      case 'plan':
+        return <ActionPlan data={mockActionPlan} query={currentQuery} score={score} />
+
+      case 'export':
+        return (
+          <ExportPDF query={currentQuery} score={score} competitors={competitors} demandData={demandData} />
+        )
+
       case 'comparison':
         return <ComparisonPage />
+
       case 'alerts':
         return <AlertsPage data={mockAlerts} />
+
       case 'history':
-        return <SearchHistory data={mockSearchHistory} onSelect={handleSearch} />
+        return (
+          <SearchHistory
+            data={history}
+            onSelect={(item) => { handleSearch(item.query) }}
+          />
+        )
+
       default:
         return null
     }
   }
 
-  const groupedNav = {
-    main: navSections.filter(s => s.group === 'main'),
-    results: navSections.filter(s => s.group === 'results'),
-    tools: navSections.filter(s => s.group === 'tools'),
-  }
+  const groups = [
+    { label: 'Principal', ids: ['search', 'score', 'competitors', 'demand', 'pricing'] },
+    { label: 'Insights', ids: ['seasonality', 'marketshare', 'complaints', 'plan'] },
+    { label: 'Ferramentas', ids: ['export', 'comparison', 'alerts', 'history'] },
+  ]
 
-  return (
-    <div className="flex h-screen bg-dark text-white overflow-hidden">
-      {/* Sidebar overlay for mobile */}
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 bg-black/50 z-20 lg:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
-      {/* Sidebar */}
-      <aside
-        className={`fixed lg:static inset-y-0 left-0 z-30 w-64 bg-dark-100 border-r border-dark-300 flex flex-col transform transition-transform duration-200 ${
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
-        }`}
-      >
-        {/* Logo */}
-        <div className="p-4 border-b border-dark-300 flex items-center justify-between">
-          <LogoOnDark />
-          <button onClick={() => setSidebarOpen(false)} className="lg:hidden text-gray-400 hover:text-white">
-            <X size={20} />
-          </button>
-        </div>
-
-        {/* Nav */}
-        <nav className="flex-1 overflow-y-auto p-3 space-y-4">
-          {/* Main */}
-          <div>
-            {groupedNav.main.map((item) => {
-              const Icon = item.icon
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => { setActiveSection(item.id); setSidebarOpen(false) }}
-                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
-                    activeSection === item.id
-                      ? 'bg-orange text-white'
-                      : 'text-gray-400 hover:text-white hover:bg-dark-300'
-                  }`}
-                >
-                  <Icon size={18} />
-                  {item.label}
-                </button>
-              )
-            })}
+  const SidebarContent = () => (
+    <div className="flex flex-col h-full">
+      <div className="p-4 border-b border-dark-300">
+        <LogoOnDark className="h-8" />
+      </div>
+      <div className="px-4 py-3 border-b border-dark-300">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-full bg-orange-500/20 border border-orange-500/40 flex items-center justify-center">
+            <span className="text-orange-400 text-xs font-bold">
+              {userName.charAt(0).toUpperCase()}
+            </span>
           </div>
-
-          {/* Results */}
-          {searchDone && (
-            <div>
-              <p className="text-xs text-gray-500 uppercase tracking-wider px-3 mb-2">Resultados</p>
-              {groupedNav.results.map((item) => {
-                const Icon = item.icon
-                return (
-                  <button
-                    key={item.id}
-                    onClick={() => { setActiveSection(item.id); setSidebarOpen(false) }}
-                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
-                      activeSection === item.id
-                        ? 'bg-orange text-white'
-                        : 'text-gray-400 hover:text-white hover:bg-dark-300'
-                    }`}
-                  >
-                    <Icon size={18} />
-                    {item.label}
-                  </button>
-                )
-              })}
-            </div>
-          )}
-
-          {/* Tools */}
-          <div>
-            <p className="text-xs text-gray-500 uppercase tracking-wider px-3 mb-2">Ferramentas</p>
-            {groupedNav.tools.map((item) => {
-              const Icon = item.icon
-              return (
+          <div className="min-w-0">
+            <p className="text-white text-sm font-medium truncate">{userName}</p>
+            <p className="text-gray-500 text-xs truncate">{user?.email}</p>
+          </div>
+        </div>
+      </div>
+      <nav className="flex-1 overflow-y-auto py-3 space-y-4">
+        {groups.map(group => (
+          <div key={group.label} className="px-3">
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider px-2 mb-1">
+              {group.label}
+            </p>
+            {navItems
+              .filter(item => group.ids.includes(item.id))
+              .map(item => (
                 <button
                   key={item.id}
                   onClick={() => { setActiveSection(item.id); setSidebarOpen(false) }}
-                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all relative ${
-                    activeSection === item.id
-                      ? 'bg-orange text-white'
-                      : 'text-gray-400 hover:text-white hover:bg-dark-300'
-                  }`}
+                  className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm transition-colors mb-0.5 text-gray-400 hover:bg-dark-200 hover:text-white"
                 >
-                  <Icon size={18} />
-                  {item.label}
+                  <item.icon size={16} className="flex-shrink-0" />
+                  <span className="flex-1 text-left">{item.label}</span>
                   {item.badge && (
-                    <span className="ml-auto bg-orange text-white text-xs w-5 h-5 rounded-full flex items-center justify-center">
+                    <span className="text-xs bg-orange-500 text-white rounded-full px-1.5 py-0.5 leading-none">
                       {item.badge}
                     </span>
                   )}
                 </button>
-              )
-            })}
+              ))}
           </div>
-        </nav>
+        ))}
+      </nav>
+      <div className="p-3 border-t border-dark-300">
+        <button
+          onClick={handleLogout}
+          className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm text-gray-400 hover:bg-dark-200 hover:text-red-400 transition-colors"
+        >
+          <LogOut size={16} />
+          <span>Sair</span>
+        </button>
+      </div>
+    </div>
+  )
 
-        {/* Logout */}
-        <div className="p-3 border-t border-dark-300">
-          <button
-            onClick={handleLogout}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-gray-400 hover:text-white hover:bg-dark-300 transition-all"
-          >
-            <LogOut size={18} />
-            Sair
-          </button>
-        </div>
+  return (
+    <div className="flex h-screen bg-dark-100 overflow-hidden">
+      <aside className="hidden lg:flex flex-col w-60 bg-dark-200 border-r border-dark-300 flex-shrink-0">
+        <SidebarContent />
       </aside>
-
-      {/* Main content */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Top bar */}
-        <header className="bg-dark-100 border-b border-dark-300 px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setSidebarOpen(true)}
-              className="lg:hidden text-gray-400 hover:text-white"
-            >
-              <Menu size={20} />
-            </button>
-            <h1 className="font-semibold text-sm text-gray-300">
-              {navSections.find(s => s.id === activeSection)?.label || 'Dashboard'}
-            </h1>
-          </div>
-          {searchDone && (
-            <ExportPDF
-              searchQuery={searchQuery}
-              scoreData={mockScoreData}
-              competitors={mockCompetitors}
-              demandData={mockDemandData}
-            />
-          )}
+      {sidebarOpen && (
+        <div className="lg:hidden fixed inset-0 z-50 flex">
+          <div className="absolute inset-0 bg-black/60" onClick={() => setSidebarOpen(false)} />
+          <aside className="relative w-64 bg-dark-200 border-r border-dark-300 flex flex-col z-10">
+            <SidebarContent />
+          </aside>
+        </div>
+      )}
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <header className="flex items-center gap-3 px-4 py-3 border-b border-dark-300 bg-dark-200 lg:hidden">
+          <button onClick={() => setSidebarOpen(true)} className="p-2 rounded-xl text-gray-400 hover:bg-dark-300 transition">
+            <Menu size={20} />
+          </button>
+          <LogoOnDark className="h-7" />
         </header>
-
-        {/* Content area */}
-        <main className="flex-1 overflow-y-auto bg-dark">
-          {renderContent()}
+        <main className="flex-1 overflow-y-auto">
+          {renderSection()}
         </main>
+      </div>
+    </div>
+  )
+}
+
+function EmptyState({ onSearch }) {
+  return (
+    <div className="p-6 flex items-center justify-center min-h-64">
+      <div className="text-center">
+        <div className="w-14 h-14 bg-dark-200 border border-dark-300 rounded-2xl flex items-center justify-center mx-auto mb-4">
+          <Zap size={24} className="text-orange-400" />
+        </div>
+        <h3 className="text-white font-semibold mb-2">Sem dados ainda</h3>
+        <p className="text-gray-500 text-sm mb-4">Faca uma pesquisa para ver os resultados aqui.</p>
+        <button
+          onClick={onSearch}
+          className="bg-orange-500 hover:bg-orange-400 text-white text-sm font-medium px-4 py-2 rounded-xl transition"
+        >
+          Pesquisar produto
+        </button>
       </div>
     </div>
   )
