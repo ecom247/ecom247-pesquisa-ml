@@ -1,7 +1,7 @@
 const SUPABASE_URL = process.env.SUPABASE_URL || ''
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 const ML_APP_ID = process.env.ML_APP_ID || ''
-const ML_APP_SECRET = process.env.ML_APP_SECRET || ''
+const ML_APP_SECRET = process.env.ML_APP_SECRET || process.env.ML_SECRET_KEY || ''
 const REDIRECT_URI = 'https://ecom247-pesquisa-ml.vercel.app/api/ml-oauth-callback'
 const DASHBOARD_URL = 'https://ecom247-pesquisa-ml.vercel.app/dashboard'
 
