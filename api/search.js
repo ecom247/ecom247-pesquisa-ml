@@ -60,7 +60,14 @@ async function searchMarketplaceItems(query, mlToken, offset, limit) {
   const headers = { 'Accept': 'application/json' }
   if (mlToken) headers['Authorization'] = 'Bearer ' + mlToken
 
-  const res = await fetch(url, { headers })
+  let res = await fetch(url, { headers })
+
+  // Se 403 com token (token expirado/inválido), retenta sem auth — endpoint é público
+  if (!res.ok && res.status === 403 && mlToken) {
+    console.warn('[ml] 403 com token, retentando sem Authorization')
+    res = await fetch(url, { headers: { 'Accept': 'application/json' } })
+  }
+
   if (!res.ok) throw new Error('/sites/MLB/search -> ' + res.status)
   return res.json()
 }
