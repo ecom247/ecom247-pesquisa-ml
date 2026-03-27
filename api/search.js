@@ -25,7 +25,7 @@ async function supaFetch(supaUrl, serviceKey, method, path, body) {
 // ── Token management ───────────────────────────────────────────────────────
 async function getValidToken(supaUrl, serviceKey, appId, appSecret) {
   const rows = await supaFetch(supaUrl, serviceKey, 'GET', '/ml_tokens?id=eq.1&select=*')
-  if (!rows?.length) throw new Error('No toker row in ml_tokens')
+  if (!rows?.length) throw new Error('No token row in ml_tokens')
   const row = rows[0]
   if (new Date(row.expires_at).getTime() - Date.now() > 5 * 60 * 1000) return row.access_token
   const refreshRes = await fetch(ML_API_BASE + '/oauth/token', {
@@ -193,14 +193,25 @@ export default async function handler(request) {
     console.log('[ml] falling back to /products/search API')
     try {
       const fbUrl = ML_API_BASE + '/products/search?site_id=MLB&q=' + encodeURIComponent(query.trim()) +
-                    '&status=active&limit=15' +
+                    '&status=active&limit=50' +
                     (mlToken ? '&access_token=' + encodeURIComponent(mlToken) : '')
       const fbRes = await fetch(fbUrl, { headers: { 'Accept': 'application/json' } })
       const fbData = await fbRes.json()
-      const fbIds = (fbData.results || []).map(p => p.id)
+      const fbResults = fbData.results || []
+      const fbIds = fbResults.map(p => p.id)
+      // Populate productMeta from catalog data so we get real product names
+      const fbMeta = {}
+      fbResults.forEach(p => {
+        fbMeta[p.id] = {
+          title: p.name || '',
+          thumbnail: '',
+          rating: 0,
+          reviews: 0
+        }
+      })
       searchResult = {
         catalogIds: fbIds,
-        productMeta: {},
+        productMeta: fbMeta,
         total: fbData.paging?.total || fbIds.length
       }
     } catch (e) {
@@ -212,7 +223,7 @@ export default async function handler(request) {
   }
 
   const { catalogIds, productMeta, total } = searchResult
-  const top10 = catalogIds.slice(0, 10)
+  const top10 = catalogIds.slice(0, 20)
 
   // ── Step 2: Fetch marketplace items for each catalog product ──────────────
   const itemsResults = await Promise.allSettled(
