@@ -4,29 +4,36 @@ export default async function handler(request) {
   const cors = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
   const url = new URL(request.url);
   const query = url.searchParams.get('q') || 'telefone';
-  const slug = query.trim().replace(/\s+/g, '-');
-  const mlUrl = 'https://lista.mercadolivre.com.br/' + encodeURIComponent(slug);
+  const token = url.searchParams.get('token') || '';
+  
+  const tests = {};
+  
+  // Test 1: products/search
   try {
-    const res = await fetch(mlUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
-        'Cache-Control': 'no-cache'
-      },
-      redirect: 'follow'
+    const r1 = await fetch('https://api.mercadolibre.com/products/search?site_id=MLB&q=' + encodeURIComponent(query) + '&limit=5' + (token ? '&access_token=' + token : ''), {
+      headers: { 'Accept': 'application/json' }
     });
-    const html = await res.text();
-    const hasLdJson = html.includes('application/ld+json');
-    const hasProduct = html.includes('"@type":"Product"');
-    const hasNordic = html.includes('__NORDIC_RENDERING_CTX__');
-    const ldCount = (html.match(/<script[^>]+type="application\/ld\+json"/g) || []).length;
-    return new Response(JSON.stringify({
-      fetchUrl: mlUrl, status: res.status, finalUrl: res.url,
-      htmlLength: html.length, hasLdJson, hasProduct, hasNordic, ldScriptCount: ldCount,
-      htmlStart: html.slice(0, 400), htmlEnd: html.slice(-200)
-    }), { headers: cors });
-  } catch(e) {
-    return new Response(JSON.stringify({ error: e.message, url: mlUrl }), { headers: cors });
+    const d1 = await r1.json();
+    tests.products_search = { status: r1.status, total: d1.paging?.total, count: d1.results?.length, first_id: d1.results?.[0]?.id };
+  } catch(e) { tests.products_search = { error: e.message }; }
+  
+  // Test 2: products/CATALOG_ID/items
+  if (tests.products_search.first_id) {
+    try {
+      const r2 = await fetch('https://api.mercadolibre.com/products/' + tests.products_search.first_id + '/items?limit=5' + (token ? '&access_token=' + token : ''));
+      const d2 = await r2.json();
+      tests.catalog_items = { status: r2.status, total: d2.paging?.total, first_price: d2.results?.[0]?.price, first_seller: d2.results?.[0]?.seller_id };
+    } catch(e) { tests.catalog_items = { error: e.message }; }
   }
+  
+  // Test 3: products/CATALOG_ID detail
+  if (tests.products_search.first_id) {
+    try {
+      const r3 = await fetch('https://api.mercadolibre.com/products/' + tests.products_search.first_id + '?access_token=' + token);
+      const d3 = await r3.json();
+      tests.catalog_detail = { status: r3.status, name: d3.name?.slice(0,60), main_image: d3.main_image?.id, pictures_count: d3.pictures?.length };
+    } catch(e) { tests.catalog_detail = { error: e.message }; }
+  }
+  
+  return new Response(JSON.stringify(tests, null, 2), { headers: cors });
 }
