@@ -46,11 +46,12 @@ async function getValidToken(supaUrl, serviceKey, appId, appSecret) {
 }
 
 // ââ Step 1: Get catalog product IDs from ML product search ââââââââââââââââââ
-// /products/search returns catalog-level entries (no auth needed server-side)
-async function getCatalogIds(query) {
-  // Fetch a larger set to have more catalog IDs to check for active listings
+// Uses APP_USR access_token for /products/search (catalog discovery only).
+// This token is needed here to avoid 403 on this endpoint.
+async function getCatalogIds(query, mlToken) {
+  const authParam = mlToken ? '&access_token=' + encodeURIComponent(mlToken) : ''
   const url = ML_API_BASE + '/products/search?site_id=MLB&q=' +
-              encodeURIComponent(query) + '&status=active&limit=50'
+              encodeURIComponent(query) + '&status=active&limit=50' + authParam
   const res = await fetch(url, { headers: { 'Accept': 'application/json' } })
   if (!res.ok) throw new Error('/products/search -> ' + res.status)
   const data = await res.json()
@@ -141,18 +142,19 @@ export default async function handler(request) {
     return new Response(JSON.stringify({ error: 'Query required' }), { status: 400, headers: cors })
   }
 
-  // ââ Refresh ML OAuth token (for save history only, NOT for item fetches) ââ
-  try { await getValidToken(SUPA_URL, SUPA_KEY, APP_ID, APP_SECRET) } catch (e) {
-    console.warn('[ml] token refresh err:', e.message)
+  // ââ Get ML OAuth token (used for catalog search, NOT for item fetches) âââââ
+  let mlToken = null
+  try { mlToken = await getValidToken(SUPA_URL, SUPA_KEY, APP_ID, APP_SECRET) } catch (e) {
+    console.warn('[ml] token fetch err:', e.message)
   }
 
-  // ââ Step 1: Get catalog IDs âââââââââââââââââââââââââââââââââââââââââââââââ
+  // ââ Step 1: Get catalog IDs (uses token for /products/search auth) âââââââââ
   let catalogSearch
   try {
-    catalogSearch = await getCatalogIds(query.trim())
+    catalogSearch = await getCatalogIds(query.trim(), mlToken)
   } catch (e) {
     console.error('[ml-catalog] search error:', e.message)
-    return new Response(JSON.stringify({ error: 'Falha ao buscar catÃ¡logo ML: ' + e.message }), {
+    return new Response(JSON.stringify({ error: 'Falha ao buscar catalogo ML: ' + e.message }), {
       status: 500, headers: cors
     })
   }
@@ -163,6 +165,9 @@ export default async function handler(request) {
   const top30 = catalogIds.slice(0, 30)
 
   // ââ Step 2: Fetch PUBLIC items for each catalog product (NO auth) âââââââââ
+  // Not passing auth token here is CRITICAL â with APP_USR token, ML would
+  // only return the authenticated seller's own listings (typically 2 items).
+  // Without auth, ML returns ALL marketplace sellers for each catalog product.
   const itemsResults = await Promise.allSettled(
     top30.map(id => getPublicCatalogItems(id))
   )
@@ -175,12 +180,10 @@ export default async function handler(request) {
     const itemsData = itemsResults[idx].status === 'fulfilled' ? itemsResults[idx].value : null
     if (!itemsData) continue
 
-    // Items endpoint can return data in different shapes
     let items = itemsData.results || itemsData.items || []
     const itemCount = itemsData.paging?.total || items.length
 
     // If items have no prices directly, try fetching item details
-    // (some catalog item responses return item IDs without price data)
     if (items.length > 0 && !items[0].price && items[0].id) {
       const detailResults = await Promise.allSettled(
         items.slice(0, 10).map(i => getItemDetails(i.id))
@@ -209,7 +212,6 @@ export default async function handler(request) {
     const goldCount         = items.filter(i => i.listing_type_id?.startsWith('gold')).length
     const goldPct           = items.length ? Math.round(goldCount / items.length * 100) : 0
 
-    // Get thumbnail from first item that has one
     const thumbnail = items.find(i => i.thumbnail)?.thumbnail || ''
 
     const meta = productMeta[catalogId] || {}
@@ -241,9 +243,8 @@ export default async function handler(request) {
     })
   }
 
-  console.log('[v6] catalog IDs checked:', top30.length, 'with active listings:', allProducts.length)
+  console.log('[v7] catalog IDs checked:', top30.length, 'with active listings:', allProducts.length)
 
-  // ââ Build competitors list ââââââââââââââââââââââââââââââââââââââââââââââââ
   // Sort by item_count descending (most active products first)
   allProducts.sort((a, b) => b.item_count - a.item_count)
 
@@ -301,9 +302,9 @@ export default async function handler(request) {
 
   const scoreDetails = {
     demand:      hasHighDemand   ? 'Alta demanda'       : 'Demanda moderada',
-    competition: hasHighComp     ? 'Alta concorrÃªncia'  : 'Baixa concorrÃªncia',
+    competition: hasHighComp     ? 'Alta concorrencia'  : 'Baixa concorrencia',
     margin:      hasGoodMargin   ? 'Margem boa'         : 'Margem baixa',
-    shipping:    hasFreeShipping ? 'Frete grÃ¡tis disponÃ­vel' : 'Frete pago comum'
+    shipping:    hasFreeShipping ? 'Frete gratis disponivel' : 'Frete pago comum'
   }
 
   // ââ Save search history âââââââââââââââââââââââââââââââââââââââââââââââââââ
@@ -334,7 +335,7 @@ export default async function handler(request) {
     } : null,
     query: query.trim(),
     total,
-    searchMode: 'catalog-public',
+    searchMode: 'catalog-public-v7',
     market: {
       catalogResults:        total,
       avgListingsPerProduct: avgItemCount,
