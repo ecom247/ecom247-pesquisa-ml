@@ -21,7 +21,8 @@ async function supaFetch(supaUrl, serviceKey, method, path, body) {
   return res.json()
 }
 
-// ── App token via client_credentials (não requer usuário, acessa dados públicos ML) ──
+// ── App token via client_credentials (não requer usuário) ────────────────────
+// Sempre retorna token fresco — contorna tokens revogados no banco.
 async function getAppToken(appId, appSecret) {
   if (!appId || !appSecret) return null
   const res = await fetch(ML_API_BASE + '/oauth/token', {
@@ -58,15 +59,13 @@ async function getValidToken(supaUrl, serviceKey, appId, appSecret) {
   return d.access_token
 }
 
-// ── Busca itens no marketplace do ML via endpoint documentado oficial ────────
-// Usa Authorization: Bearer {token} conforme documentação:
-// https://developers.mercadolivre.com.br/pt_br/itens-e-buscas
-// Este endpoint retorna TODOS os vendedores ativos, não apenas o autenticado.
+// ── Busca itens via /sites/MLB/search ────────────────────────────────────────
+// NOTA: sort=sold_quantity_desc requer escopo especial. Não incluímos para
+// garantir compatibilidade com tokens de app (client_credentials).
+// Ordenamos por sold_quantity client-side após receber os resultados.
 async function searchMarketplaceItems(query, mlToken, offset, limit) {
   const url = ML_API_BASE + '/sites/MLB/search?q=' +
     encodeURIComponent(query) +
-    '&sort=sold_quantity_desc' +
-    '&status=active' +
     '&limit=' + (limit || 50) +
     '&offset=' + (offset || 0)
 
@@ -74,7 +73,10 @@ async function searchMarketplaceItems(query, mlToken, offset, limit) {
   if (mlToken) headers['Authorization'] = 'Bearer ' + mlToken
 
   const res = await fetch(url, { headers })
-  if (!res.ok) throw new Error('/sites/MLB/search -> ' + res.status)
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '')
+    throw new Error('/sites/MLB/search -> ' + res.status + (errText ? ' ' + errText.slice(0,80) : ''))
+  }
   return res.json()
 }
 
@@ -123,33 +125,53 @@ export default async function handler(request) {
     return new Response(JSON.stringify({ error: 'Query required' }), { status: 400, headers: cors })
   }
 
-  // ── Get ML token: tenta user token (refresh) depois app token (client_credentials) ──
-  // client_credentials sempre funciona enquanto APP_ID/APP_SECRET forem válidos.
+  // ── Obter token ML ────────────────────────────────────────────────────────
+  // Estratégia v9: tentar client_credentials PRIMEIRO (token fresco garantido).
+  // Se falhar, tentar user token do Supabase como fallback.
+  // Isso evita usar tokens revogados que ainda aparecem como "válidos" no banco.
   let mlToken = null
-  try { mlToken = await getValidToken(SUPA_URL, SUPA_KEY, APP_ID, APP_SECRET) } catch (e) {
-    console.warn('[ml] user token err:', e.message)
-  }
-  if (!mlToken) {
-    try { mlToken = await getAppToken(APP_ID, APP_SECRET) } catch (e) {
-      console.warn('[ml] app token err:', e.message)
-    }
-  }
-  console.log('[v8] mlToken obtained:', !!mlToken)
 
-  // ── Busca marketplace: /sites/MLB/search com Authorization: Bearer ──────────
-  // Conforme documentação oficial ML: retorna itens ativos de TODOS os vendedores.
-  // Fazemos 2 páginas (offset 0 e 50) para ter 100 resultados no total.
+  // 1. Tentar app token (client_credentials) — sempre fresco
+  try { mlToken = await getAppToken(APP_ID, APP_SECRET) } catch (e) {
+    console.warn('[v9] app token err:', e.message)
+  }
+  console.log('[v9] app token obtained:', !!mlToken)
+
+  // 2. Fallback: user token do banco
+  if (!mlToken) {
+    try { mlToken = await getValidToken(SUPA_URL, SUPA_KEY, APP_ID, APP_SECRET) } catch (e) {
+      console.warn('[v9] user token err:', e.message)
+    }
+    console.log('[v9] user token fallback:', !!mlToken)
+  }
+
+  // ── Busca marketplace: 2 páginas paralelas ────────────────────────────────
+  const doSearch = (tok) => Promise.all([
+    searchMarketplaceItems(query.trim(), tok, 0, 50),
+    searchMarketplaceItems(query.trim(), tok, 50, 50)
+  ])
+
   let page1, page2
   try {
-    [page1, page2] = await Promise.all([
-      searchMarketplaceItems(query.trim(), mlToken, 0, 50),
-      searchMarketplaceItems(query.trim(), mlToken, 50, 50)
-    ])
+    [page1, page2] = await doSearch(mlToken)
   } catch (e) {
-    console.error('[ml-search] error:', e.message)
-    return new Response(JSON.stringify({ error: 'Falha ao buscar itens ML: ' + e.message }), {
-      status: 500, headers: cors
-    })
+    console.error('[v9] search err:', e.message)
+    // Se 403 com token atual, tentar sem token (endpoint pode ser público sem sort especial)
+    if (e.message.includes('403') && mlToken) {
+      console.warn('[v9] 403 with token, retrying without auth...')
+      try {
+        [page1, page2] = await doSearch(null)
+      } catch (e2) {
+        console.error('[v9] no-auth also failed:', e2.message)
+        return new Response(JSON.stringify({ error: 'Falha ao buscar itens ML: ' + e2.message }), {
+          status: 500, headers: cors
+        })
+      }
+    } else {
+      return new Response(JSON.stringify({ error: 'Falha ao buscar itens ML: ' + e.message }), {
+        status: 500, headers: cors
+      })
+    }
   }
 
   const total = page1.paging?.total || 0
@@ -158,12 +180,9 @@ export default async function handler(request) {
     ...(page2.results || [])
   ]
 
-  console.log('[v8] total ML:', total, 'items fetched:', allItems.length)
+  console.log('[v9] total ML:', total, 'items fetched:', allItems.length)
 
-  // ── Agrupa por vendedor e extrai top competidores ──────────────────────────
-  // Cada item do /sites/MLB/search já tem: id, title, price, sold_quantity,
-  // seller.id, seller.nickname, shipping.free_shipping, condition, thumbnail,
-  // listing_type_id, official_store_id, catalog_product_id
+  // ── Agrupa por vendedor ────────────────────────────────────────────────────
   const sellerMap = {}
 
   for (const item of allItems) {
@@ -189,9 +208,8 @@ export default async function handler(request) {
   // Ordena vendedores por quantidade vendida (mais relevantes primeiro)
   const sellers = Object.values(sellerMap).sort((a, b) => b.total_sold - a.total_sold)
 
-  // Monta lista de competidores (top 10 vendedores únicos)
+  // Top 10 vendedores únicos
   const competitors = sellers.slice(0, 10).map(s => {
-    // Melhor item do vendedor (maior sold_quantity)
     const bestItem = s.items.sort((a, b) => (b.sold_quantity || 0) - (a.sold_quantity || 0))[0]
     const prices   = s.items.map(i => i.price).filter(p => p > 0)
     const minPrice = prices.length ? Math.min(...prices) : 0
@@ -246,7 +264,7 @@ export default async function handler(request) {
   if (hasFreeShipping) score += 10
   score = Math.min(100, Math.max(0, score))
 
-  // ── Demand chart (baseado em dados reais agregados) ───────────────────────
+  // ── Demand chart ──────────────────────────────────────────────────────────
   const months = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez']
   const base = Math.max(totalSold, 100) / 12
   const demandData = months.map(month => ({
@@ -261,7 +279,7 @@ export default async function handler(request) {
     shipping:    hasFreeShipping ? 'Frete grátis comum'   : 'Frete pago comum'
   }
 
-  // ── Save search history ───────────────────────────────────────────────────
+  // ── Salva histórico ───────────────────────────────────────────────────────
   try {
     await supaFetch(SUPA_URL, SUPA_KEY, 'POST', '/search_history', {
       user_id:  userId,
@@ -289,7 +307,7 @@ export default async function handler(request) {
     } : null,
     query: query.trim(),
     total,
-    searchMode: 'marketplace-search-v8',
+    searchMode: 'marketplace-search-v9',
     market: {
       totalListings:    total,
       itemsFetched:     allItems.length,
