@@ -21,7 +21,20 @@ async function supaFetch(supaUrl, serviceKey, method, path, body) {
   return res.json()
 }
 
-// ── Token management ────────────────────────────────────────────────────────
+// ── App token via client_credentials (não requer usuário, acessa dados públicos ML) ──
+async function getAppToken(appId, appSecret) {
+  if (!appId || !appSecret) return null
+  const res = await fetch(ML_API_BASE + '/oauth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+    body: 'grant_type=client_credentials&client_id=' + appId + '&client_secret=' + appSecret
+  })
+  if (!res.ok) { console.warn('[ml] app token err:', res.status); return null }
+  const d = await res.json()
+  return d.access_token || null
+}
+
+// ── Token management (user token via refresh) ────────────────────────────────
 async function getValidToken(supaUrl, serviceKey, appId, appSecret) {
   const rows = await supaFetch(supaUrl, serviceKey, 'GET', '/ml_tokens?id=eq.1&select=*')
   if (!rows?.length) throw new Error('No token row in ml_tokens')
@@ -60,14 +73,7 @@ async function searchMarketplaceItems(query, mlToken, offset, limit) {
   const headers = { 'Accept': 'application/json' }
   if (mlToken) headers['Authorization'] = 'Bearer ' + mlToken
 
-  let res = await fetch(url, { headers })
-
-  // Se 403 com token (token expirado/inválido), retenta sem auth — endpoint é público
-  if (!res.ok && res.status === 403 && mlToken) {
-    console.warn('[ml] 403 com token, retentando sem Authorization')
-    res = await fetch(url, { headers: { 'Accept': 'application/json' } })
-  }
-
+  const res = await fetch(url, { headers })
   if (!res.ok) throw new Error('/sites/MLB/search -> ' + res.status)
   return res.json()
 }
@@ -117,11 +123,18 @@ export default async function handler(request) {
     return new Response(JSON.stringify({ error: 'Query required' }), { status: 400, headers: cors })
   }
 
-  // ── Get ML OAuth token ─────────────────────────────────────────────────────
+  // ── Get ML token: tenta user token (refresh) depois app token (client_credentials) ──
+  // client_credentials sempre funciona enquanto APP_ID/APP_SECRET forem válidos.
   let mlToken = null
   try { mlToken = await getValidToken(SUPA_URL, SUPA_KEY, APP_ID, APP_SECRET) } catch (e) {
-    console.warn('[ml] token fetch err:', e.message)
+    console.warn('[ml] user token err:', e.message)
   }
+  if (!mlToken) {
+    try { mlToken = await getAppToken(APP_ID, APP_SECRET) } catch (e) {
+      console.warn('[ml] app token err:', e.message)
+    }
+  }
+  console.log('[v8] mlToken obtained:', !!mlToken)
 
   // ── Busca marketplace: /sites/MLB/search com Authorization: Bearer ──────────
   // Conforme documentação oficial ML: retorna itens ativos de TODOS os vendedores.
