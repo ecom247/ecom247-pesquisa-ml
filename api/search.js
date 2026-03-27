@@ -1,6 +1,7 @@
 export const config = { runtime: 'edge', regions: ['gru1'] }
 
-const ML_BASE = 'https://api.mercadolibre.com'
+const ML_SEARCH_BASE = 'https://lista.mercadolivre.com.br'
+const ML_API_BASE    = 'https://api.mercadolibre.com'
 
 // ── Supabase helper ────────────────────────────────────────────────────────
 async function supaFetch(supaUrl, serviceKey, method, path, body) {
@@ -24,12 +25,10 @@ async function supaFetch(supaUrl, serviceKey, method, path, body) {
 // ── Token management ───────────────────────────────────────────────────────
 async function getValidToken(supaUrl, serviceKey, appId, appSecret) {
   const rows = await supaFetch(supaUrl, serviceKey, 'GET', '/ml_tokens?id=eq.1&select=*')
-  if (!rows?.length) throw new Error('No token row in ml_tokens')
+  if (!rows?.length) throw new Error('No toker row in ml_tokens')
   const row = rows[0]
-  // If token is still valid for >5 min, use it
   if (new Date(row.expires_at).getTime() - Date.now() > 5 * 60 * 1000) return row.access_token
-  // Try to refresh
-  const refreshRes = await fetch(ML_BASE + '/oauth/token', {
+  const refreshRes = await fetch(ML_API_BASE + '/oauth/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
     body: 'grant_type=refresh_token&client_id=' + appId + '&client_secret=' + appSecret +
@@ -47,94 +46,87 @@ async function getValidToken(supaUrl, serviceKey, appId, appSecret) {
   return d.access_token
 }
 
-// ── ML Catalog-based search (works from Vercel!) ───────────────────────────
-// Uses /products/search (catalog) + /products/CATALOG_ID/items (pricing/sellers)
-// The deprecated /sites/MLB/search?q= returned 403 — these endpoints work fine.
-async function searchByProductCatalog(query, mlToken) {
-  const authParam = mlToken ? '&access_token=' + encodeURIComponent(mlToken) : ''
+// ── Step 1: Scrape ML search page to extract active catalog product IDs ────
+// ML search page contains JSON-LD with product data + /p/MLBXXX catalog URLs.
+// Even if prices are obfuscated for bots, the catalog IDs in URLs remain intact.
+async function getCatalogIdsFromSearch(query) {
+  const slug = query.trim().replace(/\s+/g, '-')
+  const url = ML_SEARCH_BASE + '/' + encodeURIComponent(slug)
 
-  // Step 1: Search ML product catalog by keyword (returns ~10k catalog entries)
-  const searchUrl = ML_BASE + '/products/search?site_id=MLB&q=' + encodeURIComponent(query) +
-                    '&limit=20' + authParam
-  const searchRes = await fetch(searchUrl, { headers: { 'Accept': 'application/json' } })
-  if (!searchRes.ok) throw new Error('/products/search -> ' + searchRes.status)
-  const searchData = await searchRes.json()
-
-  const catalogProducts = searchData.results || []
-  if (!catalogProducts.length) return { results: [], total: 0 }
-
-  const total = searchData.paging?.total || catalogProducts.length
-
-  // Step 2: Fetch items (listings) for top 10 catalog products in parallel
-  const top10 = catalogProducts.slice(0, 10)
-  const itemsResults = await Promise.allSettled(
-    top10.map(cp =>
-      fetch(ML_BASE + '/products/' + cp.id + '/items?limit=100' + authParam, {
-        headers: { 'Accept': 'application/json' }
-      }).then(r => r.ok ? r.json() : null).catch(() => null)
-    )
-  )
-
-  // Step 3: Combine catalog product info with items data
-  const products = top10.map((cp, idx) => {
-    const itemsData = itemsResults[idx].status === 'fulfilled' ? itemsResults[idx].value : null
-    const items = itemsData?.items || itemsData?.results || []
-    const itemCount = itemsData?.paging?.total || items.length
-
-    // Price stats from items
-    const prices = items.map(i => i.price).filter(p => p > 0)
-    const avgPrice = prices.length ? prices.reduce((a, b) => a + b, 0) / prices.length : 0
-    const minPrice = prices.length ? Math.min(...prices) : 0
-    const maxPrice = prices.length ? Math.max(...prices) : 0
-
-    // Sellers
-    const uniqueSellers = new Set(items.map(i => i.seller_id).filter(Boolean))
-
-    // Shipping
-    const freeShippingItems = items.filter(i => i.shipping?.free_shipping)
-    const freeShippingPct = items.length ? freeShippingItems.length / items.length : 0
-
-    // Official stores
-    const hasOfficialStore = items.some(i => i.official_store_id)
-
-    // Listing quality
-    const goldItems = items.filter(i => i.listing_type_id?.startsWith('gold'))
-    const goldPct = items.length ? goldItems.length / items.length : 0
-
-    // Brand from attributes
-    const brandAttr = cp.attributes?.find(a => a.id === 'BRAND')
-    const brand = brandAttr?.value_name || ''
-
-    return {
-      // Catalog product info
-      id: cp.id,
-      catalog_product_id: cp.catalog_product_id || cp.id,
-      title: cp.name || '',
-      brand,
-      domain_id: cp.domain_id || '',
-      url: 'https://www.mercadolivre.com.br/p/' + cp.id,
-      thumbnail: '',               // not available from /products/search; enriched later if needed
-
-      // Market data from items
-      price: Math.round(avgPrice * 100) / 100,
-      min_price: minPrice,
-      max_price: maxPrice,
-      seller_count: uniqueSellers.size,  // number of competing sellers
-      item_count: itemCount,             // total active listings
-      free_shipping_pct: Math.round(freeShippingPct * 100),
-      has_official_store: hasOfficialStore,
-      gold_listing_pct: Math.round(goldPct * 100),
-      condition: 'new',
-      shipping_free: freeShippingPct > 0.5,
-
-      // For frontend compatibility: use seller_count as proxy for competition
-      sold: itemCount,  // total listings as proxy for demand signal
-      seller: uniqueSellers.size + ' vendedores',
-      rating: 0         // not available without read_reviews scope
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+      'Cache-Control': 'no-cache'
     }
   })
 
-  return { results: products, total }
+  if (!res.ok) {
+    console.warn('[ml-scrape] fetch failed:', res.status)
+    return null
+  }
+  const html = await res.text()
+
+  // Extract catalog IDs from all /p/MLB... patterns in the HTML
+  const catalogSet = {}
+  const rxId = /\/p\/(MLB\d+)/g
+  let m
+  while ((m = rxId.exec(html)) !== null) catalogSet[m[1]] = true
+  const catalogIds = Object.keys(catalogSet)
+
+  if (!catalogIds.length) {
+    console.warn('[ml-scrape] no catalog IDs found in HTML')
+    return null
+  }
+
+  // Extract product metadata from JSON-LD (titles, thumbnails, ratings)
+  // Note: prices in JSON-LD may be 0/obfuscated — we use ML API for real prices
+  const productMeta = {}
+  const ldRx = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/g
+  let ldM
+  while ((ldM = ldRx.exec(html)) !== null) {
+    try {
+      const d = JSON.parse(ldM[1])
+      const nodes = d['@graph'] || [d]
+      for (const node of nodes) {
+        if (node['@type'] === 'Product') {
+          const productUrl = node.offers?.url || ''
+          const idMatch = productUrl.match(/\/p\/(MLB\d+)/)
+          if (idMatch) {
+            const img = node.image
+            productMeta[idMatch[1]] = {
+              title: node.name || '',
+              thumbnail: Array.isArray(img) ? img[0] : (img || ''),
+              rating: parseFloat(node.aggregateRating?.ratingValue) || 0,
+              reviews: parseInt(node.aggregateRating?.ratingCount) || 0
+            }
+          }
+        }
+      }
+    } catch (e) { /* ignore malformed LD */ }
+  }
+
+  // Extract total results count
+  const totalM = html.match(/"total"\s*:\s*(\d{3,})/)
+  const total = totalM ? parseInt(totalM[1]) : catalogIds.length
+
+  console.log('[ml-scrape] found', catalogIds.length, 'catalog IDs, total=', total)
+  return { catalogIds: catalogIds.slice(0, 15), productMeta, total }
+}
+
+// ── Step 2: Fetch marketplace items for a catalog product via ML API ────────
+async function getCatalogItems(catalogId, mlToken) {
+  const headers = { 'Accept': 'application/json' }
+  // Use Authorization header (more reliable than query param from server)
+  if (mlToken) headers['Authorization'] = 'Bearer ' + mlToken
+
+  const res = await fetch(ML_API_BASE + '/products/' + catalogId + '/items?limit=100', { headers })
+  if (!res.ok) {
+    console.warn('[ml-items] ' + catalogId + ' -> ' + res.status)
+    return null
+  }
+  return res.json()
 }
 
 // ── Main handler ───────────────────────────────────────────────────────────
@@ -151,12 +143,12 @@ export default async function handler(request) {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers: cors })
   }
 
-  const SUPA_URL  = process.env.SUPABASE_URL
-  const SUPA_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY
-  const APP_ID    = process.env.ML_APP_ID
+  const SUPA_URL   = process.env.SUPABASE_URL
+  const SUPA_KEY   = process.env.SUPABASE_SERVICE_ROLE_KEY
+  const APP_ID     = process.env.ML_APP_ID
   const APP_SECRET = process.env.ML_APP_SECRET || process.env.ML_SECRET_KEY
 
-  // ── Auth: verify Supabase user token ────────────────────────────────────
+  // ── Auth: verify Supabase user token ─────────────────────────────────────
   let userId
   try {
     const auth = request.headers.get('authorization')
@@ -172,7 +164,7 @@ export default async function handler(request) {
     return new Response(JSON.stringify({ error: 'Unauthorized: ' + e.message }), { status: 401, headers: cors })
   }
 
-  // ── Parse body ───────────────────────────────────────────────────────────
+  // ── Parse body ────────────────────────────────────────────────────────────
   let body
   try { body = await request.json() } catch (e) {
     return new Response(JSON.stringify({ error: 'Invalid JSON body' }), { status: 400, headers: cors })
@@ -182,77 +174,151 @@ export default async function handler(request) {
     return new Response(JSON.stringify({ error: 'Query required' }), { status: 400, headers: cors })
   }
 
-  // ── Get ML token (for authenticated API calls) ───────────────────────────
+  // ── Get ML OAuth token ────────────────────────────────────────────────────
   let mlToken = null
   try { mlToken = await getValidToken(SUPA_URL, SUPA_KEY, APP_ID, APP_SECRET) } catch (e) {
     console.warn('[ml] token fetch err:', e.message)
   }
 
-  // ── Search via ML Product Catalog API ───────────────────────────────────
-  let searchData
+  // ── Step 1: Get catalog IDs from ML search page HTML ─────────────────────
+  let searchResult = null
   try {
-    searchData = await searchByProductCatalog(query.trim(), mlToken)
+    searchResult = await getCatalogIdsFromSearch(query.trim())
   } catch (e) {
-    console.error('[ml-catalog] search error:', e.message)
-    return new Response(JSON.stringify({ error: 'Falha ao buscar no catálogo ML: ' + e.message }), {
-      status: 500, headers: cors
-    })
+    console.warn('[ml-scrape] error:', e.message)
   }
 
-  const items = searchData.results || []
+  // ── Fallback: use /products/search API if HTML scraping failed ────────────
+  if (!searchResult || !searchResult.catalogIds.length) {
+    console.log('[ml] falling back to /products/search API')
+    try {
+      const fbUrl = ML_API_BASE + '/products/search?site_id=MLB&q=' + encodeURIComponent(query.trim()) +
+                    '&status=active&limit=15' +
+                    (mlToken ? '&access_token=' + encodeURIComponent(mlToken) : '')
+      const fbRes = await fetch(fbUrl, { headers: { 'Accept': 'application/json' } })
+      const fbData = await fbRes.json()
+      const fbIds = (fbData.results || []).map(p => p.id)
+      searchResult = {
+        catalogIds: fbIds,
+        productMeta: {},
+        total: fbData.paging?.total || fbIds.length
+      }
+    } catch (e) {
+      console.error('[ml] fallback search error:', e.message)
+      return new Response(JSON.stringify({ error: 'Falha ao buscar produtos: ' + e.message }), {
+        status: 500, headers: cors
+      })
+    }
+  }
 
-  // ── Build competitors list (frontend format) ─────────────────────────────
-  const competitors = items.slice(0, 10).map(item => ({
-    id: item.id,
-    title: item.title,
-    price: item.price,
-    sold: item.item_count,       // total listings as demand proxy
-    seller: item.seller,
-    rating: item.rating,
-    url: item.url,
-    thumbnail: item.thumbnail,
-    condition: item.condition,
-    shipping_free: item.shipping_free,
-    // Extra data for this approach
-    seller_count: item.seller_count,
-    min_price: item.min_price,
-    max_price: item.max_price,
-    brand: item.brand
+  const { catalogIds, productMeta, total } = searchResult
+  const top10 = catalogIds.slice(0, 10)
+
+  // ── Step 2: Fetch marketplace items for each catalog product ──────────────
+  const itemsResults = await Promise.allSettled(
+    top10.map(id => getCatalogItems(id, mlToken))
+  )
+
+  // ── Step 3: Combine catalog metadata + items data ─────────────────────────
+  const allProducts = top10.map((catalogId, idx) => {
+    const itemsData = itemsResults[idx].status === 'fulfilled' ? itemsResults[idx].value : null
+    const items = itemsData?.results || itemsData?.items || []
+    const itemCount = itemsData?.paging?.total || items.length
+
+    const prices = items.map(i => i.price).filter(p => p > 0)
+    const avgPrice = prices.length ? prices.reduce((a, b) => a + b, 0) / prices.length : 0
+    const minPrice = prices.length ? Math.min(...prices) : 0
+    const maxPrice = prices.length ? Math.max(...prices) : 0
+
+    const sellerSet = {}
+    items.forEach(i => { if (i.seller_id) sellerSet[i.seller_id] = true })
+    const sellerCount = Object.keys(sellerSet).length
+
+    const freeShippingCount = items.filter(i => i.shipping?.free_shipping).length
+    const freeShippingPct   = items.length ? freeShippingCount / items.length : 0
+    const hasOfficialStore  = items.some(i => i.official_store_id)
+    const goldCount         = items.filter(i => i.listing_type_id?.startsWith('gold')).length
+    const goldPct           = items.length ? Math.round(goldCount / items.length * 100) : 0
+
+    const meta = productMeta[catalogId] || {}
+
+    return {
+      id: catalogId,
+      catalog_product_id: catalogId,
+      title: meta.title || ('Produto ' + catalogId),
+      thumbnail: meta.thumbnail || '',
+      url: 'https://www.mercadolivre.com.br/p/' + catalogId,
+      rating: meta.rating || 0,
+      reviews: meta.reviews || 0,
+      brand: '',
+
+      price: Math.round(avgPrice * 100) / 100,
+      min_price: minPrice,
+      max_price: maxPrice,
+
+      seller_count: sellerCount,
+      item_count: itemCount,
+      free_shipping_pct: Math.round(freeShippingPct * 100),
+      has_official_store: hasOfficialStore,
+      gold_listing_pct: goldPct,
+      shipping_free: freeShippingPct > 0.5,
+      condition: 'new',
+
+      // Frontend compatibility fields
+      sold: itemCount,
+      seller: sellerCount + ' vendedores'
+    }
+  })
+
+  // Only keep products with price or listing data
+  const products = allProducts.filter(p => p.price > 0 || p.item_count > 0)
+  const displayProducts = products.length ? products : allProducts
+
+  // ── Build competitors (frontend format) ────────────────────────────────────
+  const competitors = displayProducts.slice(0, 10).map(p => ({
+    id:            p.id,
+    title:         p.title,
+    price:         p.price,
+    sold:          p.sold,
+    seller:        p.seller,
+    rating:        p.rating,
+    url:           p.url,
+    thumbnail:     p.thumbnail,
+    condition:     p.condition,
+    shipping_free: p.shipping_free,
+    seller_count:  p.seller_count,
+    min_price:     p.min_price,
+    max_price:     p.max_price,
+    brand:         p.brand
   }))
 
-  // ── Market stats ─────────────────────────────────────────────────────────
-  const prices = items.map(i => i.price).filter(p => p > 0)
-  const avgPrice = prices.length
-    ? Math.round(prices.reduce((a, b) => a + b, 0) / prices.length)
+  // ── Market stats ───────────────────────────────────────────────────────────
+  const priceList    = displayProducts.map(p => p.price).filter(p => p > 0)
+  const avgPrice     = priceList.length
+    ? Math.round(priceList.reduce((a, b) => a + b, 0) / priceList.length)
     : 0
+  const totalListings  = displayProducts.reduce((s, p) => s + p.item_count, 0)
+  const totalSellers   = displayProducts.reduce((s, p) => s + p.seller_count, 0)
+  const avgItemCount   = displayProducts.length ? Math.round(totalListings / displayProducts.length) : 0
 
-  // Use total catalog results as demand signal
-  const totalCatalogResults = searchData.total || 0
-  const avgItemCount = items.length
-    ? Math.round(items.reduce((sum, i) => sum + i.item_count, 0) / items.length)
-    : 0
-  const totalListings = items.reduce((sum, i) => sum + i.item_count, 0)
-  const totalSellers = items.reduce((sum, i) => sum + i.seller_count, 0)
+  const topItem = displayProducts.reduce((top, p) =>
+    (!top || p.item_count > top.item_count) ? p : top, null)
 
-  const topItem = items.reduce((top, item) =>
-    (!top || item.item_count > top.item_count) ? item : top, null)
-
-  // ── Opportunity score ────────────────────────────────────────────────────
-  // Based on: demand (many results = active market), margin (price > 50), competition
-  const hasHighDemand = totalCatalogResults > 1000 || totalListings > 500
-  const hasGoodMargin = avgPrice > 50
-  const hasHighCompetition = totalSellers > 500 || avgItemCount > 50
-  const hasFreeShipping = items.some(i => i.shipping_free)
+  // ── Opportunity score ─────────────────────────────────────────────────────
+  const hasHighDemand    = total > 1000 || totalListings > 500
+  const hasGoodMargin    = avgPrice > 50
+  const hasHighComp      = totalSellers > 500 || avgItemCount > 50
+  const hasFreeShipping  = displayProducts.some(p => p.shipping_free)
 
   let score = 45
-  if (hasHighDemand) score += 20
-  if (hasGoodMargin) score += 15
-  if (!hasHighCompetition) score += 10
+  if (hasHighDemand)   score += 20
+  if (hasGoodMargin)   score += 15
+  if (!hasHighComp)    score += 10
   if (hasFreeShipping) score += 10
   score = Math.min(100, Math.max(0, score))
 
-  // ── Simulated demand chart ───────────────────────────────────────────────
-  const months = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
+  // ── Demand chart (estimated) ──────────────────────────────────────────────
+  const months = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez']
   const base = Math.max(totalListings, 100) / 12
   const demandData = months.map(month => ({
     month,
@@ -260,20 +326,20 @@ export default async function handler(request) {
   }))
 
   const scoreDetails = {
-    demand: hasHighDemand ? 'Alta demanda' : 'Demanda moderada',
-    competition: hasHighCompetition ? 'Alta concorrência' : 'Baixa concorrência',
-    margin: hasGoodMargin ? 'Margem boa' : 'Margem baixa',
-    shipping: hasFreeShipping ? 'Frete grátis disponível' : 'Frete pago comum'
+    demand:      hasHighDemand   ? 'Alta demanda'       : 'Demanda moderada',
+    competition: hasHighComp     ? 'Alta concorrência'  : 'Baixa concorrência',
+    margin:      hasGoodMargin   ? 'Margem boa'         : 'Margem baixa',
+    shipping:    hasFreeShipping ? 'Frete grátis disponível' : 'Frete pago comum'
   }
 
-  // ── Save search history ──────────────────────────────────────────────────
+  // ── Save search history ────────────────────────────────────────────────────
   try {
     await supaFetch(SUPA_URL, SUPA_KEY, 'POST', '/search_history', {
-      user_id: userId,
-      query: query.trim(),
+      user_id:  userId,
+      query:    query.trim(),
       score,
-      results: { competitors: competitors.length, avgPrice, totalSales: totalListings, totalCatalog: totalCatalogResults },
-      category: items[0]?.domain_id || null
+      results:  { competitors: competitors.length, avgPrice, totalSales: totalListings, total },
+      category: null
     })
   } catch (e) {
     console.warn('[ml] history save err:', e.message)
@@ -289,16 +355,15 @@ export default async function handler(request) {
     topItem: topItem ? {
       title: topItem.title,
       price: topItem.price,
-      sold: topItem.item_count,
-      url: topItem.url
+      sold:  topItem.item_count,
+      url:   topItem.url
     } : null,
     query: query.trim(),
-    total: totalCatalogResults,
-    // Extra market stats
+    total,
     market: {
-      catalogResults: totalCatalogResults,
+      catalogResults:        total,
       avgListingsPerProduct: avgItemCount,
-      totalActiveSellers: totalSellers
+      totalActiveSellers:    totalSellers
     }
   }), { headers: cors })
 }
